@@ -263,7 +263,44 @@ tr:hover td{background:#FFFBF0;}
 </div>
 <!-- ============ END MAIN APP ============ -->
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+/* =========================================================
+   SUPABASE CONNECTION
+   เชื่อมต่อฐานข้อมูลจริง แทนที่ window.storage เดิม
+   (window.storage ใช้ได้แค่ตอนรันใน Claude.ai เท่านั้น)
+   ========================================================= */
+const SUPABASE_URL = "https://xcnxtopqwuwwcpkczmys.supabase.co";
+const SUPABASE_KEY = "sb_publishable_nk7y4hIX07Ulm6SLaKXOGQ_WDiVeJwu";
+const _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// shim ที่ทำหน้าตาเหมือน window.storage เดิมทุกประการ
+// แต่ข้างในไปอ่าน/เขียนที่ตาราง app_storage ใน Supabase จริง
+window.storage = {
+  async get(key, shared=false){
+    const { data, error } = await _sb.from('app_storage').select('value').eq('key', key).maybeSingle();
+    if(error || !data) throw new Error('key not found: ' + key);
+    return { key, value: data.value, shared };
+  },
+  async set(key, value, shared=false){
+    const { error } = await _sb.from('app_storage').upsert({ key, value, updated_at: new Date().toISOString() });
+    if(error){ console.error('supabase set error', error); return null; }
+    return { key, value, shared };
+  },
+  async delete(key, shared=false){
+    const { error } = await _sb.from('app_storage').delete().eq('key', key);
+    if(error){ console.error('supabase delete error', error); return null; }
+    return { key, deleted:true, shared };
+  },
+  async list(prefix='', shared=false){
+    let q = _sb.from('app_storage').select('key');
+    if(prefix) q = q.like('key', prefix + '%');
+    const { data, error } = await q;
+    if(error){ console.error('supabase list error', error); return null; }
+    return { keys: (data||[]).map(d=>d.key), prefix, shared };
+  }
+};
+
 /* =========================================================
    BLUUM DASHBOARD — data model, calculations, rendering
    ========================================================= */
