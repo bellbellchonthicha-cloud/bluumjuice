@@ -136,7 +136,7 @@ tr:hover td{background:#FFFBF0;}
 .menu-block.BLUSH{border-left-color:var(--r-blush);}
 .menu-block.ROOT{border-left-color:var(--r-root);}
 .menu-block.TROPIC{border-left-color:var(--r-tropic);}
-.ing-row{display:grid;grid-template-columns:1.25fr 0.55fr 0.55fr 0.45fr 0.8fr auto;gap:8px;align-items:center;margin-bottom:6px;}
+.ing-row{display:grid;grid-template-columns:1.25fr 0.85fr 0.85fr 0.8fr auto;gap:8px;align-items:start;margin-bottom:6px;padding-top:2px;}
 .menu-photo{width:96px;height:96px;border-radius:18px;object-fit:cover;box-shadow:var(--shadow);flex-shrink:0;}
 .menu-tagline{font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;display:inline-block;margin-top:4px;}
 .ing-row input,.ing-row select{width:100%;padding:7px 8px;border-radius:8px;border:1px solid var(--line);background:#FBF8F1;font-size:13px;}
@@ -435,6 +435,14 @@ function thMonthLabel(mk){
   return `${names[m-1]} ${y}`;
 }
 function ingredientPrice(name){ const i = state.ingredients.find(x=>x.name===name); return i? Number(i.price):0; }
+function gramsForQty(ingredientName, qty){
+  const ing = state.ingredients.find(x=>x.name===ingredientName);
+  if(!ing) return null;
+  if(/กรัม|กก\.|g\b|kg\b/i.test(ing.unit||'')) return null; // หน่วยเป็นน้ำหนักอยู่แล้ว ไม่ต้องแปลงซ้ำ
+  const grams = Number(qty) * Number(ing.weight||0) * 1000;
+  if(!isFinite(grams)) return null;
+  return Math.round(grams);
+}
 function showToast(msg){
   const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
   clearTimeout(showToast._t); showToast._t=setTimeout(()=>t.classList.remove('show'), 2200);
@@ -1069,7 +1077,6 @@ function renderRecipesTab(){
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">วัตถุดิบ</span>
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต่อ 1 ขวด (แก้ไขได้)</span>
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต่อ 10 ขวด (อัตโนมัติ)</span>
-            <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">หน่วย</span>
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต้นทุน (บาท)</span>
             <span></span>
           </div>
@@ -1077,14 +1084,25 @@ function renderRecipesTab(){
             const unitPrice = ingredientPrice(ing.name);
             const lineCost = Number(ing.qty)*unitPrice;
             const perBottle = Math.round((Number(ing.qty)/10)*1000)/1000;
+            const unit = (state.ingredients.find(x=>x.name===ing.name)||{}).unit||'';
+            const gramsBottle = gramsForQty(ing.name, perBottle);
+            const gramsBatch = gramsForQty(ing.name, ing.qty);
             return `
             <div class="ing-row">
               <select data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="name">
                 ${state.ingredients.map(gi=>`<option ${gi.name===ing.name?'selected':''}>${gi.name}</option>`).join('')}
               </select>
-              <input type="number" min="0" step="0.001" data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="qtyPerBottle" value="${perBottle}">
-              <span class="locked-field mono" style="padding:6px 8px;font-size:12.5px;">🔒 ${Number(ing.qty).toLocaleString('th-TH',{maximumFractionDigits:2})}</span>
-              <span style="font-size:12.5px;color:var(--ink-soft);">${(state.ingredients.find(x=>x.name===ing.name)||{}).unit||''}</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:5px;">
+                  <input type="number" min="0" step="0.001" data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="qtyPerBottle" value="${perBottle}" style="min-width:0;">
+                  <span style="font-size:12.5px;color:var(--ink-soft);white-space:nowrap;">${unit}</span>
+                </div>
+                ${gramsBottle!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${gramsBottle.toLocaleString('th-TH')} กรัม</div>` : ''}
+              </div>
+              <div>
+                <span class="locked-field mono" style="padding:6px 8px;font-size:12.5px;display:block;">🔒 ${Number(ing.qty).toLocaleString('th-TH',{maximumFractionDigits:2})} ${unit}</span>
+                ${gramsBatch!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${gramsBatch.toLocaleString('th-TH')} กรัม</div>` : ''}
+              </div>
               <span class="locked-field mono" style="padding:6px 8px;font-size:13px;">🔒 ${fmtMoney(lineCost)}</span>
               <button class="btn btn-danger btn-sm" data-recipe-del="${r.key}" data-ing-idx-del="${i}">ลบ</button>
             </div>`;
