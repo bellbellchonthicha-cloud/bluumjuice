@@ -311,7 +311,12 @@ window.storage = {
    BLUUM DASHBOARD — data model, calculations, rendering
    ========================================================= */
 
-const DEFAULT_CHANNELS = ['LINE OA','LINE MAN','Grab','ShopeeFood'];
+const DEFAULT_CHANNELS = [
+  {name:'LINE OA', priceType:'lineoa', commission:0},
+  {name:'LINE MAN', priceType:'other', commission:0.30},
+  {name:'Grab', priceType:'other', commission:0.30},
+  {name:'ShopeeFood', priceType:'other', commission:0.30},
+];
 const LEGACY_MENU_META = {
   RESET:{label:'RESET', emoji:'💚'},
   GLOW:{label:'GLOW', emoji:'🧡'},
@@ -363,6 +368,7 @@ let state = {
 };
 let activeTab = 'dashboard';
 let editing = {sales:null, expense:null, purchase:null, production:null};
+let channelPendingDeleteIdx = null;
 
 /* ---------- default / seed data (mirrors the original spreadsheet) ---------- */
 function defaultSettings(){
@@ -400,19 +406,19 @@ function defaultIngredients(){
 function defaultRecipes(){
   const base = [
     {key:'RESET', shelfLifeDays:3, ingredients:[
-      {name:'แอปเปิ้ลเขียว', qty:10},{name:'แตงกวา', qty:8},{name:'เลมอน', qty:5},{name:'ขิง', qty:60},
+      {name:'แอปเปิ้ลเขียว', qty:1800},{name:'แตงกวา', qty:1800},{name:'เลมอน', qty:250},{name:'ขิง', qty:100},
     ]},
     {key:'GLOW', shelfLifeDays:3, ingredients:[
-      {name:'ส้ม', qty:20},{name:'แครอท', qty:10},{name:'ขิง', qty:80},
+      {name:'ส้ม', qty:2600},{name:'แครอท', qty:1300},{name:'ขิง', qty:100},
     ]},
     {key:'BLUSH', shelfLifeDays:3, ingredients:[
-      {name:'แตงโม', qty:1},{name:'แอปเปิ้ลแดง', qty:10},{name:'เลมอน', qty:5},
+      {name:'แตงโม', qty:3200},{name:'แอปเปิ้ลแดง', qty:1600},{name:'เลมอน', qty:200},
     ]},
     {key:'ROOT', shelfLifeDays:3, ingredients:[
-      {name:'บีทรูด', qty:5},{name:'แอปเปิ้ลแดง', qty:10},{name:'แครอท', qty:10},
+      {name:'บีทรูด', qty:1200},{name:'แอปเปิ้ลแดง', qty:1800},{name:'แครอท', qty:1300},
     ]},
     {key:'TROPIC', shelfLifeDays:3, ingredients:[
-      {name:'สับปะรด', qty:3},{name:'ส้ม', qty:10},{name:'เลมอน', qty:5},
+      {name:'สับปะรด', qty:2500},{name:'ส้ม', qty:1700},{name:'เลมอน', qty:250},
     ]},
   ];
   return base.map(r=>({
@@ -464,6 +470,27 @@ function thMonthLabel(mk){
   const [y,m]=mk.split('-').map(Number);
   return `${names[m-1]} ${y}`;
 }
+/* ---------- ช่องกรอกวันที่ รวมช่องเดียว รูปแบบ วว/ดด/ปปปป (วันขึ้นก่อนเดือนเสมอ ไม่พึ่ง locale เบราว์เซอร์) + ปุ่มปฏิทินช่วยเลือกวัน ----------
+   หมายเหตุ: ปุ่ม 📅 เป็นแค่ไอคอนตกแต่ง (pointer-events:none) ส่วน input[type=date] จริงวางทับอยู่บนปุ่มแบบโปร่งใส
+   เพื่อให้การแตะเป็นการคลิก input ปฏิทินจริง ๆ (เบราว์เซอร์เปิดปฏิทินให้แน่นอน ไม่ต้องพึ่ง showPicker() ที่บางเบราว์เซอร์/เว็บวิวไม่รองรับ) */
+function dateFieldHTML(idPrefix, isoValue){
+  const safeIso = /^\d{4}-\d{2}-\d{2}$/.test(isoValue||'') ? isoValue : todayStr();
+  return `
+  <div style="display:flex;gap:6px;align-items:center;">
+    <input type="text" inputmode="numeric" class="mono" id="${idPrefix}" data-date-field="1" value="${fmtDateTH(safeIso)}" placeholder="วว/ดด/ปปปป" maxlength="10" style="flex:1;min-width:0;">
+    <div style="position:relative;flex:none;width:38px;height:38px;">
+      <button type="button" tabindex="-1" title="เลือกวันที่จากปฏิทิน" style="position:absolute;inset:0;pointer-events:none;border:1px solid var(--line);background:var(--paper);border-radius:8px;font-size:15px;display:flex;align-items:center;justify-content:center;">📅</button>
+      <input type="date" id="${idPrefix}-picker" data-date-picker="${idPrefix}" value="${safeIso}" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;">
+    </div>
+  </div>`;
+}
+function readDateField(idPrefix){
+  const raw = (document.getElementById(idPrefix).value||'').trim();
+  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(!m) return '';
+  const d = pad(parseInt(m[1])), mo = pad(parseInt(m[2])), y = m[3];
+  return `${y}-${mo}-${d}`;
+}
 function ingredientPrice(name){ const i = state.ingredients.find(x=>x.name===name); return i? Number(i.price):0; }
 function gramsForQty(ingredientName, qty){
   const ing = state.ingredients.find(x=>x.name===ingredientName);
@@ -472,6 +499,62 @@ function gramsForQty(ingredientName, qty){
   const grams = Number(qty) * Number(ing.weight||0) * 1000;
   if(!isFinite(grams)) return null;
   return Math.round(grams);
+}
+
+/* ---------- ล็อคสูตรตามคัมภีร์น้ำสกัดเย็นหน้าร้าน (PDF) ----------
+   แนวคิด: แยก "ราคาซื้อวัตถุดิบ" ออกจาก "สูตร" กันคนละส่วนชัดเจน
+   - ราคาวัตถุดิบ: กรอกตามหน่วยที่ซื้อจริง (เช่น 12 บาท/ลูก) — หน่วยจะเป็นอะไรก็ได้ ไม่ต้องคิดเป็นกรัมเอง
+   - สูตร: ล็อคเป็น "กรัมต่อขวด" ตายตัวตาม PDF เสมอ ไม่ขึ้นกับหน่วยซื้อหรือราคาที่แก้ภายหลัง
+   ระบบจะแปลงกรัมในสูตร → จำนวนที่ต้องซื้อ (ลูก/หัว) และต้นทุน (บาท) ให้อัตโนมัติ
+   โดยใช้ "น้ำหนัก/หน่วย (กก.)" ของวัตถุดิบแต่ละชนิดเป็นตัวแปลง */
+const LOCKED_RECIPE_GRAMS = {
+  RESET:  [{name:'แอปเปิ้ลเขียว', g:180},{name:'แตงกวา', g:180},{name:'เลมอน', g:25},{name:'ขิง', g:10}],
+  GLOW:   [{name:'ส้ม', g:260},{name:'แครอท', g:130},{name:'ขิง', g:10}],
+  BLUSH:  [{name:'แตงโม', g:320},{name:'แอปเปิ้ลแดง', g:160},{name:'เลมอน', g:20}],
+  ROOT:   [{name:'บีทรูด', g:120},{name:'แอปเปิ้ลแดง', g:180},{name:'แครอท', g:130}],
+  TROPIC: [{name:'สับปะรด', g:250},{name:'ส้ม', g:170},{name:'เลมอน', g:25}],
+};
+// น้ำหนัก/หน่วย เริ่มต้น ใช้แปลงกรัม <-> หน่วยซื้อจริง (ปรับได้ทีหลังถ้าขนาดผลไม้ที่ซื้อไม่เท่านี้ — ไม่กระทบปริมาณสูตร)
+const DEFAULT_PURCHASE_UNIT = {
+  'แอปเปิ้ลเขียว':{unit:'ลูก', price:12, weight:0.15},
+  'แอปเปิ้ลแดง':{unit:'ลูก', price:10, weight:0.15},
+  'ส้ม':{unit:'ลูก', price:8, weight:0.20},
+  'แตงกวา':{unit:'ลูก', price:5, weight:0.15},
+  'แครอท':{unit:'หัว', price:5, weight:0.10},
+  'บีทรูด':{unit:'หัว', price:15, weight:0.15},
+  'สับปะรด':{unit:'ลูก', price:25, weight:1.20},
+  'แตงโม':{unit:'ลูกใหญ่ (5-6 กก.)', price:60, weight:5.50},
+  'เลมอน':{unit:'ลูก', price:8, weight:0.08},
+  'ขิง':{unit:'กรัม', price:0.5, weight:0.001},
+};
+function lockRecipesToPosterStandard(){
+  let changed = false;
+  // คืนหน่วยซื้อของวัตถุดิบหลักให้เป็นหน่วยที่ซื้อจริง (เผื่อเคยถูกแปลงเป็น "กรัม" ไปจากเวอร์ชันก่อนหน้า)
+  state.ingredients.forEach(ing=>{
+    const std = DEFAULT_PURCHASE_UNIT[ing.name];
+    if(std && ing.unit==='กรัม' && std.unit!=='กรัม'){
+      ing.unit = std.unit; ing.price = std.price; ing.weight = std.weight;
+      changed = true;
+    }
+  });
+  // บังคับปริมาณสูตร 5 เมนูหลักให้ตรงกับ PDF (กรัมต่อขวด x10 = ต่อรอบผลิต) — ค่านี้ไม่ผูกกับหน่วยซื้อ
+  Object.keys(LOCKED_RECIPE_GRAMS).forEach(key=>{
+    const r = state.recipes.find(x=>x.key===key);
+    if(!r) return;
+    const target = LOCKED_RECIPE_GRAMS[key].map(t=>({name:t.name, qty:t.g*10}));
+    const same = r.ingredients.length===target.length &&
+      r.ingredients.every((ing,i)=> ing.name===target[i].name && Number(ing.qty)===target[i].qty);
+    if(!same){ r.ingredients = target; changed = true; }
+  });
+  return changed;
+}
+// ราคาต่อกรัม แปลงจาก "ราคา/หน่วยซื้อจริง" ÷ "น้ำหนัก/หน่วย(กก.)×1000" — ใช้คำนวณต้นทุนสูตร (ซึ่งเก็บเป็นกรัมเสมอ)
+function ingredientPricePerGram(name){
+  const ing = state.ingredients.find(x=>x.name===name);
+  if(!ing) return 0;
+  const gramsPerUnit = Number(ing.weight||0)*1000;
+  if(!gramsPerUnit) return 0;
+  return Number(ing.price||0)/gramsPerUnit;
 }
 function showToast(msg){
   const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
@@ -505,7 +588,30 @@ async function loadState(){
     shelfLifeDays: r.shelfLifeDays || 3,
     ingredients: r.ingredients || []
   }));
-  if(!state.channels || !state.channels.length) state.channels = [...DEFAULT_CHANNELS];
+  // migration: แปลงช่องทางจาก string เดิม เป็น object {name, priceType, commission} เพื่อให้ตั้งค่าคอมแยกต่อช่องทางได้
+  const LEGACY_COMMISSION_KEY = {'LINE MAN':'commissionLineMan', 'Grab':'commissionGrab', 'ShopeeFood':'commissionShopee'};
+  let channelsMigrated = false;
+  state.channels = (state.channels||[]).map(c=>{
+    if(typeof c === 'string'){
+      channelsMigrated = true;
+      const commKey = LEGACY_COMMISSION_KEY[c];
+      return {
+        name: c,
+        priceType: c==='LINE OA' ? 'lineoa' : 'other',
+        commission: commKey ? Number(state.settings[commKey]||0) : 0
+      };
+    }
+    return c;
+  });
+  if(!state.channels.length){ state.channels = DEFAULT_CHANNELS.map(c=>({...c})); channelsMigrated = true; }
+  if(channelsMigrated) await persist('channels');
+  // ล็อคสูตรให้ตรงกับ PDF ครั้งเดียว + คืนหน่วยซื้อวัตถุดิบให้เป็นหน่วยที่ซื้อจริง (V2 = เวอร์ชันที่แยกราคาซื้อออกจากสูตร)
+  if(!state.settings.recipeLockedToPosterV2){
+    const changed = lockRecipesToPosterStandard();
+    state.settings.recipeLockedToPosterV2 = true;
+    if(changed){ await persist('ingredients'); await persist('recipes'); }
+    await persist('settings');
+  }
 }
 async function persist(key){
   try{ await window.storage.set(key, JSON.stringify(state[key]), false); }
@@ -523,23 +629,25 @@ function materialCostPerBottleAvg(){
 function recipeBatchCost(menuKey){
   const r = state.recipes.find(x=>x.key===menuKey);
   if(!r) return 0;
-  return r.ingredients.reduce((s,ing)=> s + Number(ing.qty)*ingredientPrice(ing.name), 0);
+  return r.ingredients.reduce((s,ing)=> s + Number(ing.qty)*ingredientPricePerGram(ing.name), 0);
 }
 function recipeCostPerBottle(menuKey){ return recipeBatchCost(menuKey)/10; }
 function totalCostPerBottle(){
   return materialCostPerBottleAvg() + Number(state.settings.packagingCost) + Number(state.settings.shippingCost);
 }
 function marginLineOA(){ return state.settings.priceLineOA - totalCostPerBottle(); }
+function findChannel(name){ return (state.channels||[]).find(c=>c.name===name) || null; }
 function channelCommission(ch){
-  if(ch==='LINE MAN') return Number(state.settings.commissionLineMan);
-  if(ch==='Grab') return Number(state.settings.commissionGrab);
-  if(ch==='ShopeeFood') return Number(state.settings.commissionShopee);
-  return 0;
+  const c = findChannel(ch);
+  return c ? Number(c.commission)||0 : 0;
 }
-function channelPrice(ch){ return ch==='LINE OA' ? Number(state.settings.priceLineOA) : Number(state.settings.priceOther); }
+function channelPrice(ch){
+  const c = findChannel(ch);
+  const priceType = c ? c.priceType : 'other';
+  return priceType==='lineoa' ? Number(state.settings.priceLineOA) : Number(state.settings.priceOther);
+}
 function saleRevenue(row){
   const price = channelPrice(row.channel);
-  if(row.channel==='LINE OA') return row.bottles*price;
   return row.bottles*price*(1-channelCommission(row.channel));
 }
 function saleCost(row){ return row.bottles*totalCostPerBottle(); }
@@ -550,7 +658,7 @@ function salesOnDate(d){ return state.salesLog.filter(r=>r.date===d); }
 
 function channelSummary(rows){
   const out = {};
-  state.channels.forEach(c=> out[c] = {bottles:0, revenue:0, profit:0});
+  state.channels.forEach(c=> out[c.name] = {bottles:0, revenue:0, profit:0});
   rows.forEach(r=>{
     if(!out[r.channel]) out[r.channel] = {bottles:0, revenue:0, profit:0};
     out[r.channel].bottles += Number(r.bottles);
@@ -656,7 +764,7 @@ const TABS = [
 function renderTabs(){
   const el = document.getElementById('tabs');
   el.innerHTML = TABS.map(t=>`<button class="tab-btn ${activeTab===t.key?'active':''}" data-tab="${t.key}">${t.label}</button>`).join('');
-  el.querySelectorAll('.tab-btn').forEach(b=> b.addEventListener('click', ()=>{ activeTab=b.dataset.tab; editing={sales:null,expense:null,purchase:null,production:null}; renderAll(); }));
+  el.querySelectorAll('.tab-btn').forEach(b=> b.addEventListener('click', ()=>{ activeTab=b.dataset.tab; editing={sales:null,expense:null,purchase:null,production:null}; channelPendingDeleteIdx=null; renderAll(); }));
 }
 function renderHeaderDate(){
   const d = new Date();
@@ -714,7 +822,8 @@ function renderDashboard(){
   const profitMoM = prevM.profit>0 ? ((curM.profit-prevM.profit)/prevM.profit) : null;
 
   const otherPrice = Number(s.priceOther);
-  const avgOtherComm = (Number(s.commissionLineMan)+Number(s.commissionGrab)+Number(s.commissionShopee))/3;
+  const otherChannels = state.channels.filter(c=>c.priceType==='other');
+  const avgOtherComm = otherChannels.length ? otherChannels.reduce((sum,c)=>sum+Number(c.commission||0),0)/otherChannels.length : 0;
   const otherProfitPerBottle = otherPrice*(1-avgOtherComm) - totalCost;
   const otherMarginPct = otherPrice? otherProfitPerBottle/otherPrice : 0;
   const marginLineOAPct = s.priceLineOA? margin/s.priceLineOA : 0;
@@ -816,9 +925,6 @@ function renderDashboard(){
     ${settingsField('fixedCostPerDay','ต้นทุนคงที่/วัน (บาท)','number', s.fixedCostPerDay)}
     ${settingsField('targetBottlesPerDay','เป้าหมาย (ขวด/วัน)','number', s.targetBottlesPerDay)}
     ${settingsField('currentStock','สต๊อกคงเหลือ (ขวด)','number', s.currentStock)}
-    ${settingsField('commissionLineMan','ค่าคอม LINE MAN (%)','number', s.commissionLineMan, 0.01)}
-    ${settingsField('commissionGrab','ค่าคอม Grab (%)','number', s.commissionGrab, 0.01)}
-    ${settingsField('commissionShopee','ค่าคอม ShopeeFood (%)','number', s.commissionShopee, 0.01)}
     ${settingsField('reorderPoint','จุดสั่งซื้อขั้นต่ำ (ขวด)','number', s.reorderPoint)}
     ${settingsField('priceOther','ราคาช่องทางอื่น/ขวด (บาท)','number', s.priceOther)}
     ${settingsField('packagingCost','ต้นทุนบรรจุภัณฑ์/ขวด (บาท)','number', s.packagingCost, 0.01)}
@@ -834,14 +940,47 @@ function renderDashboard(){
     ${settingsField('monthlyProfitTarget','🎯 เป้าหมายกำไรรายเดือน (บาท)','number', s.monthlyProfitTarget)}
   </div>
 
+  <div class="section-title">📡 ช่องทางการขาย &amp; ค่าคอมมิชชั่น</div>
+  <div class="section-hint">แต่ละช่องทางเลือกได้ว่าจะอิงราคาไหน — "ราคา LINE OA" (ปกติไม่หักค่าคอม) หรือ "ราคาช่องทางอื่น" (ใช้กับช่องทางที่แพลตฟอร์มหักค่าคอม) แล้วตั้งค่าคอม % ของช่องทางนั้นแยกได้เอง เพิ่มช่องทางใหม่ได้ที่แท็บ "ยอดขาย"</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ช่องทาง</th><th>อิงราคา</th><th class="num">ค่าคอม (%)</th><th class="num">ราคาที่ได้จริง/ขวด</th><th></th></tr></thead>
+    <tbody>
+    ${state.channels.map((ch,idx)=>{
+      const basePrice = ch.priceType==='lineoa' ? Number(s.priceLineOA) : Number(s.priceOther);
+      const netPrice = basePrice*(1-Number(ch.commission||0));
+      if(channelPendingDeleteIdx===idx){
+        return `<tr>
+          <td colspan="5">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;">
+              <span style="font-size:13px;font-weight:700;color:var(--coral);">⚠️ ลบช่องทาง "${ch.name}" ใช่หรือไม่? (ยอดขายเก่าของช่องทางนี้จะยังอยู่ในรายงาน)</span>
+              <button type="button" class="btn btn-danger btn-sm" data-channel-del-confirm="${idx}">ยืนยัน ลบ</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-channel-del-cancel="1">ยกเลิก</button>
+            </div>
+          </td>
+        </tr>`;
+      }
+      return `<tr>
+        <td>${ch.name}</td>
+        <td><select data-channel-pricetype="${idx}" style="background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:6px 8px;">
+          <option value="lineoa" ${ch.priceType==='lineoa'?'selected':''}>ราคา LINE OA (${fmtMoney(s.priceLineOA)} บ.)</option>
+          <option value="other" ${ch.priceType==='other'?'selected':''}>ราคาช่องทางอื่น (${fmtMoney(s.priceOther)} บ.)</option>
+        </select></td>
+        <td class="num"><input class="mono" type="number" min="0" max="100" step="0.01" data-channel-commission="${idx}" value="${(Number(ch.commission||0)*100).toLocaleString('th-TH',{maximumFractionDigits:2})}" style="width:80px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
+        <td class="num">${fmtMoney(netPrice)} บาท</td>
+        <td><button type="button" class="btn btn-danger btn-sm" data-channel-del="${idx}">ลบ</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>
+
   <div class="section-title">🧾 ยอดขายวันนี้แยกตามช่องทาง</div>
   <div class="table-wrap"><table>
     <thead><tr><th>ช่องทาง</th><th class="num">จำนวนขวด</th><th class="num">รายได้ (บาท)</th><th class="num">กำไร (บาท)</th></tr></thead>
     <tbody>
     ${state.channels.map(ch=>{
-      const v = chSum.byChannel[ch]||{bottles:0,revenue:0,profit:0};
-      const isBest = ch===bestCh && v.bottles>0;
-      return `<tr><td>${ch} ${isBest?'<span class="badge badge-green">🏆 ดีที่สุด</span>':''}</td><td class="num">${fmtInt(v.bottles)}</td><td class="num">${fmtMoney(v.revenue)}</td><td class="num">${fmtMoney(v.profit)}</td></tr>`;
+      const v = chSum.byChannel[ch.name]||{bottles:0,revenue:0,profit:0};
+      const isBest = ch.name===bestCh && v.bottles>0;
+      return `<tr><td>${ch.name} ${isBest?'<span class="badge badge-green">🏆 ดีที่สุด</span>':''}</td><td class="num">${fmtInt(v.bottles)}</td><td class="num">${fmtMoney(v.revenue)}</td><td class="num">${fmtMoney(v.profit)}</td></tr>`;
     }).join('')}
     <tr class="total-row"><td>รวมทั้งหมด</td><td class="num">${fmtInt(chSum.total.bottles)}</td><td class="num">${fmtMoney(chSum.total.revenue)}</td><td class="num">${fmtMoney(chSum.total.profit)}</td></tr>
     </tbody>
@@ -883,12 +1022,14 @@ function renderDashboard(){
     <thead><tr><th>วัตถุดิบ</th><th class="num">ต้องใช้ตามสูตร</th><th class="num">ซื้อวันนี้</th><th class="num">ขาด/เหลือ</th><th class="num">น้ำหนักที่ต้องซื้อเพิ่ม</th><th>สถานะ</th></tr></thead>
     <tbody>
     ${state.ingredients.map(ing=>{
-      const need = ingredientRequiredForBatch(ing.name);
+      const gramsNeeded = ingredientRequiredForBatch(ing.name);
+      const gramsPerUnit = Number(ing.weight||0)*1000;
+      const need = gramsPerUnit>0 ? gramsNeeded/gramsPerUnit : gramsNeeded;
       const bought = purchasedOn(today, ing.name);
       const diff = bought-need;
       const ok = diff>=0;
       const shortageWeight = ok? 0 : Math.abs(diff)*Number(ing.weight);
-      return `<tr><td>${ing.name}</td><td class="num">${need} ${ing.unit}</td><td class="num">${bought} ${ing.unit}</td><td class="num">${diff>=0?'+':''}${diff}</td><td class="num">${ok?'-':shortageWeight.toLocaleString('th-TH',{maximumFractionDigits:2})+' กก.'}</td><td>${ok?`<span class="pill badge-green">🟢 พอแล้ว</span>`:`<span class="pill badge-red">🔴 ต้องซื้อเพิ่ม ${Math.abs(diff)} ${ing.unit}</span>`}</td></tr>`;
+      return `<tr><td>${ing.name}</td><td class="num">${need.toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</td><td class="num">${bought} ${ing.unit}</td><td class="num">${diff>=0?'+':''}${diff.toLocaleString('th-TH',{maximumFractionDigits:1})}</td><td class="num">${ok?'-':shortageWeight.toLocaleString('th-TH',{maximumFractionDigits:2})+' กก.'}</td><td>${ok?`<span class="pill badge-green">🟢 พอแล้ว</span>`:`<span class="pill badge-red">🔴 ต้องซื้อเพิ่ม ${Math.abs(diff).toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</span>`}</td></tr>`;
     }).join('')}
     </tbody>
   </table></div>
@@ -947,19 +1088,23 @@ function renderSalesTab(){
   <div class="section-hint">1 แถว = ยอดขาย 1 ช่องทางใน 1 วัน — รายได้และกำไรคำนวณอัตโนมัติจากราคา/ต้นทุนในแท็บภาพรวม</div>
   <div class="form-card">
     <div class="form-grid">
-      <div class="field"><label>วันที่</label><input type="date" id="f-sales-date" value="${editRow?editRow.date:todayStr()}"></div>
-      <div class="field"><label>ช่องทาง</label><select id="f-sales-channel">${state.channels.map(c=>`<option value="${c}" ${editRow&&editRow.channel===c?'selected':''}>${c}</option>`).join('')}</select></div>
+      <div class="field"><label>วันที่</label>${dateFieldHTML('f-sales-date', editRow?editRow.date:todayStr())}</div>
+      <div class="field"><label>ช่องทาง</label><select id="f-sales-channel">${state.channels.map(c=>`<option value="${c.name}" ${editRow&&editRow.channel===c.name?'selected':''}>${c.name}</option>`).join('')}</select></div>
       <div class="field"><label>จำนวนขวด</label><input type="number" min="0" id="f-sales-bottles" value="${editRow?editRow.bottles:''}" placeholder="เช่น 21"></div>
       <button class="btn btn-brand" id="btn-sales-save">${editRow?'💾 บันทึกการแก้ไข':'+ เพิ่มรายการ'}</button>
       ${editRow?`<button class="btn btn-ghost" id="btn-sales-cancel">ยกเลิก</button>`:''}
     </div>
     <div style="margin-top:12px;">
       <button type="button" class="btn btn-ghost btn-sm" id="btn-channel-add-toggle">+ เพิ่มช่องทางการขายใหม่</button>
-      <div id="channel-add-box" style="display:none;gap:6px;margin-top:8px;align-items:center;">
-        <input type="text" id="f-new-channel" placeholder="ชื่อช่องทางใหม่ เช่น Facebook Shop" style="max-width:240px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:8px 10px;">
+      <div id="channel-add-box" style="display:none;gap:6px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        <input type="text" id="f-new-channel" placeholder="ชื่อช่องทางใหม่ เช่น Facebook Shop" style="max-width:220px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:8px 10px;">
+        <select id="f-new-channel-pricetype" style="background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:8px 10px;">
+          <option value="lineoa">ใช้ราคา LINE OA (${fmtMoney(state.settings.priceLineOA)} บ./ขวด)</option>
+          <option value="other" selected>ใช้ราคาช่องทางอื่น (${fmtMoney(state.settings.priceOther)} บ./ขวด)</option>
+        </select>
         <button type="button" class="btn btn-brand btn-sm" id="btn-channel-add-save">บันทึกช่องทาง</button>
       </div>
-      <div class="section-hint" style="margin:6px 0 0;">ช่องทางใหม่จะใช้ "ราคาช่องทางอื่น/ขวด" และไม่มีค่าคอมมิชชั่นจนกว่าจะตั้งค่าเพิ่มเติม</div>
+      <div class="section-hint" style="margin:6px 0 0;">เลือกได้ว่าช่องทางใหม่จะอิงราคา LINE OA หรือราคาช่องทางอื่น ส่วนค่าคอมมิชชั่น (%) ของช่องทางนี้ไปตั้งแยกได้ที่แท็บ "ภาพรวม" หัวข้อ "ช่องทางการขาย &amp; ค่าคอมมิชชั่น" (เริ่มต้น 0%)</div>
     </div>
   </div>
   <div class="table-wrap"><table>
@@ -985,7 +1130,7 @@ function renderExpenseTab(){
   <div class="section-hint">กรอกค่าใช้จ่ายทุกรายการที่จ่ายจริง เพื่อคำนวณกระแสเงินสด</div>
   <div class="form-card">
     <div class="form-grid">
-      <div class="field"><label>วันที่</label><input type="date" id="f-exp-date" value="${editRow?editRow.date:todayStr()}"></div>
+      <div class="field"><label>วันที่</label>${dateFieldHTML('f-exp-date', editRow?editRow.date:todayStr())}</div>
       <div class="field"><label>หมวดหมู่</label><select id="f-exp-cat">${EXPENSE_CATEGORIES.map(c=>`<option ${editRow&&editRow.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
       <div class="field"><label>รายการ</label><input type="text" id="f-exp-item" value="${editRow?editRow.item:''}" placeholder="เช่น ซื้อขวด+ฝา"></div>
       <div class="field"><label>จำนวนเงิน (บาท)</label><input type="number" min="0" id="f-exp-amount" value="${editRow?editRow.amount:''}" placeholder="0"></div>
@@ -1016,7 +1161,7 @@ function renderPurchaseTab(){
   <div class="section-hint">กรอกทุกครั้งที่ซื้อวัตถุดิบ เพื่อเช็คในแท็บภาพรวมว่าซื้อพอตามสูตรหรือยัง ก่อนออกไปซื้อเพิ่ม</div>
   <div class="form-card">
     <div class="form-grid">
-      <div class="field"><label>วันที่</label><input type="date" id="f-pur-date" value="${editRow?editRow.date:todayStr()}"></div>
+      <div class="field"><label>วันที่</label>${dateFieldHTML('f-pur-date', editRow?editRow.date:todayStr())}</div>
       <div class="field"><label>วัตถุดิบ</label><select id="f-pur-ing">${state.ingredients.map(i=>`<option ${editRow&&editRow.ingredient===i.name?'selected':''}>${i.name}</option>`).join('')}</select></div>
       <div class="field"><label>จำนวนที่ซื้อ</label><input type="number" min="0" id="f-pur-qty" value="${editRow?editRow.qty:''}" placeholder="0"></div>
       <div class="field"><label>หมายเหตุ</label><input type="text" id="f-pur-note" value="${editRow?(editRow.note||''):''}" placeholder="ไม่บังคับ"></div>
@@ -1063,7 +1208,7 @@ function renderProductionTab(){
   <div class="section-title">🏭 บันทึกการผลิตรายวัน</div>
   <div class="section-hint">1 แถว = ผลิตทั้งหมดที่ทำใน 1 วัน — ระบบคำนวณของเสีย/มูลค่าของเสียตามอายุการเก็บรักษาของแต่ละเมนูให้อัตโนมัติ (ดูที่แท็บภาพรวม)</div>
   <div class="form-card">
-    <div class="field" style="max-width:220px;margin-bottom:14px;"><label>วันที่ผลิต</label><input type="date" id="f-prod-date" value="${editRow?editRow.date:todayStr()}"></div>
+    <div class="field" style="max-width:260px;margin-bottom:14px;"><label>วันที่ผลิต</label>${dateFieldHTML('f-prod-date', editRow?editRow.date:todayStr())}</div>
     <div class="form-grid">${menuInputs}</div>
     <div style="margin-top:14px;display:flex;gap:8px;">
       <button class="btn btn-brand" id="btn-prod-save">${editRow?'💾 บันทึกการแก้ไข':'+ บันทึกการผลิตวันนี้'}</button>
@@ -1099,23 +1244,25 @@ function renderRecipesTab(){
   const batchLabel = `${state.recipes.length} เมนู x 10 ขวด = ${batchBottles} ขวด`;
   return `
   <div class="section-title">📋 ราคาวัตถุดิบต่อหน่วย</div>
-  <div class="section-hint">แก้ไขหน่วย ราคา และน้ำหนัก/หน่วยได้ที่นี่ที่เดียว (น้ำหนักจริงอาจต่างกันตามแหล่งซื้อ) — สูตรทุกเมนูด้านล่างและต้นทุน/ขวดในแท็บภาพรวมจะดึงราคาจากตรงนี้อัตโนมัติ คอลัมน์ขวา 2 ช่องคือปริมาณที่ต้องใช้จริงต่อ 1 รอบผลิต (${batchLabel}) แปลงเป็นน้ำหนักให้อัตโนมัติ สำหรับใช้อ้างอิงตอนไปซื้อของจริง</div>
+  <div class="section-hint">ใส่ "ราคา" และ "หน่วย" ตามที่ซื้อจริงได้เลย (เช่น แอปเปิ้ล 12 บาท/ลูก) ไม่ต้องคิดเป็นราคาต่อกรัมเอง — ใส่ "น้ำหนัก/หน่วย (กก.)" ไว้ 1 ค่าเพื่อให้ระบบแปลงเป็นกรัมสำหรับคำนวณต้นทุนสูตรอัตโนมัติ (ปรับราคา/น้ำหนักได้อิสระ ไม่กระทบปริมาณสูตรที่ล็อคไว้) คอลัมน์ขวา 2 ช่องคือปริมาณที่ต้องใช้จริงต่อ 1 รอบผลิต (${batchLabel}) แปลงเป็นจำนวนที่ต้องซื้อและน้ำหนักให้อัตโนมัติ สำหรับใช้อ้างอิงตอนไปซื้อของจริง</div>
   <div class="table-wrap"><table>
     <thead><tr><th>วัตถุดิบ</th><th>หน่วย</th><th class="num">ราคา/หน่วย (บาท)</th><th class="num">น้ำหนัก/หน่วย (กก.)</th><th class="num">ใช้/รอบผลิต (${batchBottles} ขวด)</th><th class="num">น้ำหนักที่ต้องซื้อ (กก.)</th></tr></thead>
     <tbody>
     ${state.ingredients.map((ing,idx)=>{
-      const need = ingredientRequiredForBatch(ing.name);
-      const needWeight = need*Number(ing.weight);
+      const gramsNeeded = ingredientRequiredForBatch(ing.name);
+      const gramsPerUnit = Number(ing.weight||0)*1000;
+      const unitsNeeded = gramsPerUnit>0 ? gramsNeeded/gramsPerUnit : gramsNeeded;
+      const needWeightKg = gramsNeeded/1000;
       return `
       <tr><td>${ing.name}</td>
         <td><input class="mono" data-ing-unit="${idx}" type="text" value="${ing.unit}" style="width:70px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
         <td class="num"><input class="mono" data-ing-price="${idx}" type="number" min="0" step="0.01" value="${ing.price}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
         <td class="num"><input class="mono" data-ing-weight="${idx}" type="number" min="0" step="0.001" value="${ing.weight}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
-        <td class="num">${need} ${ing.unit}</td>
-        <td class="num">${needWeight.toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>`;
+        <td class="num">${unitsNeeded.toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</td>
+        <td class="num">${needWeightKg.toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>`;
     }).join('')}
     <tr class="total-row"><td colspan="5">รวมน้ำหนักวัตถุดิบทั้งหมดที่ต้องซื้อ (1 รอบผลิต / ${batchBottles} ขวด)</td>
-      <td class="num">${state.ingredients.reduce((s,ing)=>s+ingredientRequiredForBatch(ing.name)*Number(ing.weight),0).toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>
+      <td class="num">${(state.ingredients.reduce((s,ing)=>s+ingredientRequiredForBatch(ing.name),0)/1000).toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>
     </tbody>
   </table></div>
 
@@ -1123,7 +1270,7 @@ function renderRecipesTab(){
     <span>🍹 สูตรเมนู (แสดงต่อ 10 ขวด และต่อ 1 ขวด/เมนู)</span>
     <button class="btn btn-brand btn-sm" id="btn-recipe-add">+ เพิ่มสูตรใหม่</button>
   </div>
-  <div class="section-hint">กรอกปริมาณวัตถุดิบ "ต่อ 1 ขวด" ได้เลย ระบบจะคำนวณ "ต่อ 10 ขวด" และต้นทุนให้อัตโนมัติ (ต้นทุนต่อวัตถุดิบ = จำนวน × ราคา/หน่วย) — ปรับอายุการเก็บรักษาของแต่ละเมนูได้เช่นกัน หรือกด "แก้ไขสูตร" เพื่อเปลี่ยนรูปภาพ ชื่อ และจุดเด่นของสูตร</div>
+  <div class="section-hint">สูตรทุกเมนูกำหนดเป็น "กรัมต่อขวด" เสมอ (ตายตัวตามมาตรฐานหน้าร้าน ไม่ขึ้นกับหน่วยซื้อ) — กรอกจำนวนกรัมต่อ 1 ขวดได้เลย ระบบจะคำนวณต่อ 10 ขวดและต้นทุนให้อัตโนมัติ ตัวเลข "≈ ... ลูก/หัว" ที่โชว์ใต้ช่องกรอกเป็นแค่ตัวช่วยประมาณตอนไปซื้อของ (จะเปลี่ยนถ้าปรับ "น้ำหนัก/หน่วย" ด้านบน แต่ไม่กระทบปริมาณสูตรจริง) — ปรับอายุการเก็บรักษาของแต่ละเมนูได้เช่นกัน หรือกด "แก้ไขสูตร" เพื่อเปลี่ยนรูปภาพ ชื่อ และจุดเด่นของสูตร</div>
   ${state.recipes.map((r,ridx)=>{
     const cost = recipeBatchCost(r.key);
     const theme = recipeTheme(ridx);
@@ -1147,18 +1294,21 @@ function renderRecipesTab(){
           </div>
           <div class="ing-row" style="margin-bottom:8px;">
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">วัตถุดิบ</span>
-            <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต่อ 1 ขวด (แก้ไขได้)</span>
+            <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต่อ 1 ขวด (กรัม แก้ไขได้)</span>
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต่อ 10 ขวด (อัตโนมัติ)</span>
             <span style="font-size:11px;color:var(--ink-soft);font-weight:700;">ต้นทุน (บาท)</span>
             <span></span>
           </div>
           ${r.ingredients.map((ing,i)=>{
-            const unitPrice = ingredientPrice(ing.name);
-            const lineCost = Number(ing.qty)*unitPrice;
-            const perBottle = Math.round((Number(ing.qty)/10)*1000)/1000;
-            const unit = (state.ingredients.find(x=>x.name===ing.name)||{}).unit||'';
-            const gramsBottle = gramsForQty(ing.name, perBottle);
-            const gramsBatch = gramsForQty(ing.name, ing.qty);
+            const ingMaster = state.ingredients.find(x=>x.name===ing.name)||{};
+            const pricePerGram = ingredientPricePerGram(ing.name);
+            const lineCost = Number(ing.qty)*pricePerGram;
+            const perBottleGrams = Math.round((Number(ing.qty)/10)*100)/100;
+            const batchGrams = Number(ing.qty);
+            const isGramUnit = (ingMaster.unit||'')==='กรัม';
+            const gramsPerUnit = Number(ingMaster.weight||0)*1000;
+            const unitsPerBottle = (!isGramUnit && gramsPerUnit) ? perBottleGrams/gramsPerUnit : null;
+            const unitsPerBatch = (!isGramUnit && gramsPerUnit) ? batchGrams/gramsPerUnit : null;
             return `
             <div class="ing-row">
               <select data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="name">
@@ -1166,14 +1316,14 @@ function renderRecipesTab(){
               </select>
               <div>
                 <div style="display:flex;align-items:center;gap:5px;">
-                  <input type="number" min="0" step="0.001" data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="qtyPerBottle" value="${perBottle}" style="min-width:0;">
-                  <span style="font-size:12.5px;color:var(--ink-soft);white-space:nowrap;">${unit}</span>
+                  <input type="number" min="0" step="1" data-recipe="${r.key}" data-ing-idx="${i}" data-ing-field="qtyPerBottle" value="${perBottleGrams}" style="min-width:0;">
+                  <span style="font-size:12.5px;color:var(--ink-soft);white-space:nowrap;">กรัม</span>
                 </div>
-                ${gramsBottle!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${gramsBottle.toLocaleString('th-TH')} กรัม</div>` : ''}
+                ${unitsPerBottle!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${unitsPerBottle.toLocaleString('th-TH',{maximumFractionDigits:2})} ${ingMaster.unit} (ประมาณ ใช้ซื้อของ)</div>` : ''}
               </div>
               <div>
-                <span class="locked-field mono" style="padding:6px 8px;font-size:12.5px;display:block;">🔒 ${Number(ing.qty).toLocaleString('th-TH',{maximumFractionDigits:2})} ${unit}</span>
-                ${gramsBatch!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${gramsBatch.toLocaleString('th-TH')} กรัม</div>` : ''}
+                <span class="locked-field mono" style="padding:6px 8px;font-size:12.5px;display:block;">🔒 ${batchGrams.toLocaleString('th-TH',{maximumFractionDigits:0})} กรัม</span>
+                ${unitsPerBatch!==null ? `<div style="font-size:10.5px;color:var(--ink-soft);margin-top:2px;">≈ ${unitsPerBatch.toLocaleString('th-TH',{maximumFractionDigits:2})} ${ingMaster.unit}</div>` : ''}
               </div>
               <span class="locked-field mono" style="padding:6px 8px;font-size:13px;">🔒 ${fmtMoney(lineCost)}</span>
               <button class="btn btn-danger btn-sm" data-recipe-del="${r.key}" data-ing-idx-del="${i}">ลบ</button>
@@ -1261,14 +1411,18 @@ function renderRecipeModal(){
     </div>
     <div class="field" style="margin-top:10px;"><label>จุดเด่นของสูตร</label><input type="text" id="rf-tagline" value="${s.tagline}" placeholder="เช่น สดชื่น เผาผลาญไขมัน"></div>
 
-    <div style="margin-top:16px;font-weight:700;font-size:13px;">วัตถุดิบ (ระบุปริมาณต่อ 1 ขวด)</div>
+    <div style="margin-top:16px;font-weight:700;font-size:13px;">วัตถุดิบ (ระบุปริมาณเป็นกรัม ต่อ 1 ขวด)</div>
+    <div class="section-hint" style="margin-top:2px;">ถ้ายังไม่มีผลไม้/วัตถุดิบที่ต้องการในลิสต์ เลือก "+ วัตถุดิบใหม่..." แล้วพิมพ์ชื่อได้เลย ระบบจะเพิ่มเข้าไปในตาราง "ราคาวัตถุดิบต่อหน่วย" ด้านบนให้อัตโนมัติ (ไปตั้งราคา/หน่วย/น้ำหนักของมันได้ทีหลัง)</div>
     <div id="rf-ing-list" style="margin-top:6px;display:flex;flex-direction:column;gap:6px;">
       ${s.ingredients.map((ing,i)=>`
-        <div style="display:flex;gap:6px;align-items:center;">
-          <select data-rf-ing-idx="${i}" data-rf-ing-field="name" style="flex:1.3;">
-            ${state.ingredients.map(gi=>`<option ${gi.name===ing.name?'selected':''}>${gi.name}</option>`).join('')}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <select data-rf-ing-select="${i}" style="flex:1.3;min-width:140px;">
+            ${state.ingredients.map(gi=>`<option value="${gi.name}" ${gi.name===ing.name?'selected':''}>${gi.name}</option>`).join('')}
+            <option value="__NEW__" ${ing.name==='__NEW__'?'selected':''}>+ วัตถุดิบใหม่...</option>
           </select>
-          <input type="number" min="0" step="0.001" data-rf-ing-idx="${i}" data-rf-ing-field="qty" value="${Math.round((Number(ing.qty)/10)*1000)/1000}" style="flex:0.7;" placeholder="ต่อ 1 ขวด">
+          ${ing.name==='__NEW__' ? `<input type="text" data-rf-ing-idx="${i}" data-rf-ing-field="newname" value="${ing._newName||''}" placeholder="ชื่อวัตถุดิบใหม่ เช่น มะม่วง" style="flex:1;min-width:120px;">` : ''}
+          <input type="number" min="0" step="1" data-rf-ing-idx="${i}" data-rf-ing-field="qty" value="${Math.round((Number(ing.qty)/10)*100)/100}" style="flex:0.7;min-width:70px;" placeholder="กรัม/ขวด">
+          <span style="font-size:12px;color:var(--ink-soft);">กรัม</span>
           <button type="button" class="btn btn-danger btn-sm" data-rf-ing-del="${i}">ลบ</button>
         </div>`).join('')}
     </div>
@@ -1279,6 +1433,14 @@ function renderRecipeModal(){
       <button class="btn btn-ghost" id="rf-cancel">ยกเลิก</button>
       ${s.editKey ? `<button class="btn btn-danger" id="rf-delete">ลบสูตรนี้</button>` : ''}
     </div>
+    ${s.editKey && s._confirmingDelete ? `
+    <div style="margin-top:12px;padding:12px;background:var(--coral-light);border:1px solid var(--coral);border-radius:10px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px;">⚠️ ต้องการลบสูตรนี้ใช่หรือไม่? ประวัติยอดผลิต/ยอดขายเดิมของเมนูนี้จะยังอยู่ในรายงานเก่า</div>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="btn btn-danger btn-sm" id="rf-delete-confirm">ยืนยัน ลบสูตรนี้</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="rf-delete-cancel">ยกเลิก</button>
+      </div>
+    </div>` : ''}
   `;
   document.getElementById('rf-image-input').addEventListener('change', handleRecipeImageChange);
   document.getElementById('rf-ing-add').addEventListener('click', ()=>{
@@ -1293,17 +1455,37 @@ function renderRecipeModal(){
       renderRecipeModal();
     });
   });
+  document.querySelectorAll('#rf-ing-list [data-rf-ing-select]').forEach(sel=>{
+    sel.addEventListener('change', ()=>{
+      const idx = parseInt(sel.dataset.rfIngSelect);
+      recipeModalState.ingredients[idx].name = sel.value;
+      if(sel.value!=='__NEW__') delete recipeModalState.ingredients[idx]._newName;
+      renderRecipeModal(); // re-render เพื่อโชว์/ซ่อนช่องกรอกชื่อวัตถุดิบใหม่
+    });
+  });
   document.querySelectorAll('#rf-ing-list [data-rf-ing-idx]').forEach(inp=>{
     inp.addEventListener('change', ()=>{
       const idx = parseInt(inp.dataset.rfIngIdx);
       const field = inp.dataset.rfIngField;
       if(field==='qty'){ recipeModalState.ingredients[idx].qty = (parseFloat(inp.value)||0)*10; }
-      else { recipeModalState.ingredients[idx].name = inp.value; }
+      else if(field==='newname'){ recipeModalState.ingredients[idx]._newName = inp.value; }
     });
   });
   document.getElementById('rf-save').addEventListener('click', saveRecipeModal);
   document.getElementById('rf-cancel').addEventListener('click', closeRecipeModal);
-  if(s.editKey){ document.getElementById('rf-delete').addEventListener('click', deleteRecipeFromModal); }
+  if(s.editKey){
+    document.getElementById('rf-delete').addEventListener('click', ()=>{
+      recipeModalState._confirmingDelete = true;
+      renderRecipeModal();
+    });
+  }
+  const delConfirmBtn = document.getElementById('rf-delete-confirm');
+  if(delConfirmBtn) delConfirmBtn.addEventListener('click', deleteRecipeFromModal);
+  const delCancelBtn = document.getElementById('rf-delete-cancel');
+  if(delCancelBtn) delCancelBtn.addEventListener('click', ()=>{
+    recipeModalState._confirmingDelete = false;
+    renderRecipeModal();
+  });
 }
 function handleRecipeImageChange(e){
   const file = e.target.files && e.target.files[0];
@@ -1334,27 +1516,43 @@ async function saveRecipeModal(){
   const emoji = document.getElementById('rf-emoji').value.trim() || '🍹';
   const tagline = document.getElementById('rf-tagline').value.trim();
   const shelfLifeDays = parseFloat(document.getElementById('rf-shelf').value)||3;
-  const ingredients = s.ingredients.filter(ing=>ing.name);
+
+  // แปลงแถวที่เลือก "+ วัตถุดิบใหม่..." ให้เป็นชื่อจริง แล้วเพิ่มเข้าตาราง "ราคาวัตถุดิบต่อหน่วย" ด้านบนให้อัตโนมัติ
+  let addedNewIngredient = false;
+  const resolved = s.ingredients.map(ing=>{
+    if(ing.name==='__NEW__'){
+      const newName = (ing._newName||'').trim();
+      if(!newName) return null;
+      const exists = state.ingredients.find(x=>x.name.toLowerCase()===newName.toLowerCase());
+      if(!exists){
+        state.ingredients.push({name:newName, unit:'กรัม', price:0, weight:0.001});
+        addedNewIngredient = true;
+      }
+      return {name: exists ? exists.name : newName, qty: ing.qty};
+    }
+    return {name: ing.name, qty: ing.qty};
+  }).filter(Boolean);
+
+  if(addedNewIngredient) await persist('ingredients');
   if(s.editKey){
     const r = state.recipes.find(x=>x.key===s.editKey);
     r.label = label; r.emoji = emoji; r.tagline = tagline; r.shelfLifeDays = shelfLifeDays;
     if(s.image) r.image = s.image;
-    r.ingredients = ingredients.length ? ingredients : r.ingredients;
+    r.ingredients = resolved.length ? resolved : r.ingredients;
   } else {
     const finalKey = slugifyRecipeKey(label);
     state.recipes.push({
       key: finalKey, label, emoji, tagline, shelfLifeDays,
-      image: s.image || '', ingredients: ingredients.length ? ingredients : [blankIngredientRow()]
+      image: s.image || '', ingredients: resolved.length ? resolved : [blankIngredientRow()]
     });
   }
   await persist('recipes');
   closeRecipeModal();
   renderAll();
-  showToast('บันทึกสูตรเรียบร้อยแล้ว');
+  showToast(addedNewIngredient ? 'บันทึกสูตรและเพิ่มวัตถุดิบใหม่ในตารางราคาแล้ว (อย่าลืมไปตั้งราคา/หน่วย)' : 'บันทึกสูตรเรียบร้อยแล้ว');
 }
 function deleteRecipeFromModal(){
   if(!recipeModalState || !recipeModalState.editKey) return;
-  if(!confirm('ต้องการลบสูตรนี้ใช่หรือไม่? ประวัติยอดผลิต/ยอดขายเดิมของเมนูนี้จะยังอยู่ในรายงานเก่า')) return;
   state.recipes = state.recipes.filter(r=>r.key!==recipeModalState.editKey);
   persist('recipes').then(()=>{
     closeRecipeModal();
@@ -1367,6 +1565,15 @@ function deleteRecipeFromModal(){
    EVENT HANDLERS
    ========================================================= */
 function attachHandlers(){
+  // ปฏิทิน: เมื่อเลือกวันจาก input[type=date] ที่วางทับปุ่ม 📅 ให้ sync ไปช่องข้อความ วว/ดด/ปปปป
+  document.querySelectorAll('[data-date-picker]').forEach(picker=>{
+    picker.addEventListener('change', ()=>{
+      const idPrefix = picker.dataset.datePicker;
+      const textInput = document.getElementById(idPrefix);
+      if(textInput && picker.value) textInput.value = fmtDateTH(picker.value);
+    });
+  });
+
   if(activeTab==='dashboard'){
     document.querySelectorAll('[data-setting]').forEach(inp=>{
       inp.addEventListener('change', async ()=>{
@@ -1376,12 +1583,52 @@ function attachHandlers(){
         renderAll();
       });
     });
+    document.querySelectorAll('[data-channel-pricetype]').forEach(sel=>{
+      sel.addEventListener('change', async ()=>{
+        const idx = parseInt(sel.dataset.channelPricetype);
+        state.channels[idx].priceType = sel.value;
+        await persist('channels');
+        renderAll();
+      });
+    });
+    document.querySelectorAll('[data-channel-commission]').forEach(inp=>{
+      inp.addEventListener('change', async ()=>{
+        const idx = parseInt(inp.dataset.channelCommission);
+        state.channels[idx].commission = (parseFloat(inp.value)||0)/100;
+        await persist('channels');
+        renderAll();
+      });
+    });
+    document.querySelectorAll('[data-channel-del]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        if(state.channels.length<=1){ showToast('ต้องมีช่องทางการขายอย่างน้อย 1 ช่องทาง'); return; }
+        channelPendingDeleteIdx = parseInt(b.dataset.channelDel);
+        renderAll();
+      });
+    });
+    document.querySelectorAll('[data-channel-del-confirm]').forEach(b=>{
+      b.addEventListener('click', async ()=>{
+        const idx = parseInt(b.dataset.channelDelConfirm);
+        const removed = state.channels[idx];
+        state.channels.splice(idx,1);
+        channelPendingDeleteIdx = null;
+        await persist('channels');
+        renderAll();
+        showToast(`ลบช่องทาง "${removed.name}" แล้ว`);
+      });
+    });
+    document.querySelectorAll('[data-channel-del-cancel]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        channelPendingDeleteIdx = null;
+        renderAll();
+      });
+    });
   }
 
   if(activeTab==='sales'){
     const saveBtn = document.getElementById('btn-sales-save');
     if(saveBtn) saveBtn.addEventListener('click', async ()=>{
-      const date = document.getElementById('f-sales-date').value;
+      const date = readDateField('f-sales-date');
       const channel = document.getElementById('f-sales-channel').value;
       const bottles = parseFloat(document.getElementById('f-sales-bottles').value);
       if(!date || !bottles && bottles!==0){ showToast('กรุณากรอกวันที่และจำนวนขวด'); return; }
@@ -1411,11 +1658,12 @@ function attachHandlers(){
     const chSave = document.getElementById('btn-channel-add-save');
     if(chSave) chSave.addEventListener('click', async ()=>{
       const name = document.getElementById('f-new-channel').value.trim();
+      const priceType = document.getElementById('f-new-channel-pricetype').value;
       if(!name){ showToast('กรุณากรอกชื่อช่องทาง'); return; }
-      if(state.channels.some(c=>c.toLowerCase()===name.toLowerCase())){ showToast('มีช่องทางนี้อยู่แล้ว'); return; }
-      state.channels.push(name);
+      if(state.channels.some(c=>c.name.toLowerCase()===name.toLowerCase())){ showToast('มีช่องทางนี้อยู่แล้ว'); return; }
+      state.channels.push({name, priceType, commission:0});
       await persist('channels');
-      showToast(`เพิ่มช่องทาง "${name}" เรียบร้อยแล้ว`);
+      showToast(`เพิ่มช่องทาง "${name}" เรียบร้อยแล้ว — ไปตั้งค่าคอมมิชชั่นได้ที่แท็บภาพรวม`);
       renderAll();
     });
   }
@@ -1423,7 +1671,7 @@ function attachHandlers(){
   if(activeTab==='expense'){
     const saveBtn = document.getElementById('btn-exp-save');
     if(saveBtn) saveBtn.addEventListener('click', async ()=>{
-      const date = document.getElementById('f-exp-date').value;
+      const date = readDateField('f-exp-date');
       const category = document.getElementById('f-exp-cat').value;
       const item = document.getElementById('f-exp-item').value;
       const amount = parseFloat(document.getElementById('f-exp-amount').value);
@@ -1451,7 +1699,7 @@ function attachHandlers(){
   if(activeTab==='purchase'){
     const saveBtn = document.getElementById('btn-pur-save');
     if(saveBtn) saveBtn.addEventListener('click', async ()=>{
-      const date = document.getElementById('f-pur-date').value;
+      const date = readDateField('f-pur-date');
       const ingredient = document.getElementById('f-pur-ing').value;
       const qty = parseFloat(document.getElementById('f-pur-qty').value);
       const note = document.getElementById('f-pur-note').value;
@@ -1497,7 +1745,7 @@ function attachHandlers(){
   if(activeTab==='production'){
     const saveBtn = document.getElementById('btn-prod-save');
     if(saveBtn) saveBtn.addEventListener('click', async ()=>{
-      const date = document.getElementById('f-prod-date').value;
+      const date = readDateField('f-prod-date');
       if(!date){ showToast('กรุณากรอกวันที่ผลิต'); return; }
       const menus = {};
       MENUS().forEach(m=>{
@@ -1853,13 +2101,15 @@ async function buildWorkbook(){
     styleHeaderRow(ws.getRow(1));
     let totalW = 0;
     state.ingredients.forEach(ing=>{
-      const need = ingredientRequiredForBatch(ing.name);
-      const needW = need*Number(ing.weight);
+      const gramsNeeded = ingredientRequiredForBatch(ing.name);
+      const gramsPerUnit = Number(ing.weight||0)*1000;
+      const need = gramsPerUnit>0 ? gramsNeeded/gramsPerUnit : gramsNeeded;
+      const needW = gramsNeeded/1000;
       totalW += needW;
       const row = ws.addRow({name:ing.name, unit:ing.unit, price:Number(ing.price), weight:Number(ing.weight), need:need, needW:needW});
       row.getCell('price').numFmt = MONEY_FMT;
       row.getCell('weight').numFmt = '0.000';
-      row.getCell('need').numFmt = INT_FMT;
+      row.getCell('need').numFmt = '0.0';
       row.getCell('needW').numFmt = '0.00';
     });
     const totalRow = ws.addRow({name:'รวมน้ำหนักที่ต้องซื้อ (1 รอบผลิต)', unit:'', price:'', weight:'', need:'', needW:totalW});
@@ -1884,11 +2134,10 @@ async function buildWorkbook(){
       const m = MENUS().find(x=>x.key===r.key);
       let menuCost = 0;
       r.ingredients.forEach(ing=>{
-        const unitPrice = ingredientPrice(ing.name);
-        const lineCost = Number(ing.qty)*unitPrice;
+        const pricePerGram = ingredientPricePerGram(ing.name);
+        const lineCost = Number(ing.qty)*pricePerGram;
         menuCost += lineCost;
-        const unit = (state.ingredients.find(x=>x.name===ing.name)||{}).unit || '';
-        const row = ws.addRow({menu:`${m.emoji} ${m.label}`, ing:ing.name, qty10:Number(ing.qty), qty1:Number(ing.qty)/10, unit:unit, cost:lineCost});
+        const row = ws.addRow({menu:`${m.emoji} ${m.label}`, ing:ing.name, qty10:Number(ing.qty), qty1:Number(ing.qty)/10, unit:'กรัม', cost:lineCost});
         row.getCell('qty10').numFmt = INT_FMT;
         row.getCell('qty1').numFmt = '0.00';
         row.getCell('cost').numFmt = MONEY_FMT;
@@ -1922,9 +2171,7 @@ async function buildWorkbook(){
     const rows = [
       ['ราคา LINE OA/ขวด (บาท)', s.priceLineOA],
       ['ราคาช่องทางอื่น/ขวด (บาท)', s.priceOther],
-      ['ค่าคอม LINE MAN (%)', s.commissionLineMan],
-      ['ค่าคอม Grab (%)', s.commissionGrab],
-      ['ค่าคอม ShopeeFood (%)', s.commissionShopee],
+      ...state.channels.map(ch=>[`ค่าคอม ${ch.name} (%) — อิงราคา ${ch.priceType==='lineoa'?'LINE OA':'ช่องทางอื่น'}`, Number(ch.commission||0)*100]),
       ['ต้นทุนบรรจุภัณฑ์/ขวด (บาท)', s.packagingCost],
       ['ค่าส่งเฉลี่ย/ขวด (บาท)', s.shippingCost],
       ['ต้นทุนคงที่/วัน (บาท)', s.fixedCostPerDay],
