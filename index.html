@@ -641,10 +641,14 @@ function channelCommission(ch){
   const c = findChannel(ch);
   return c ? Number(c.commission)||0 : 0;
 }
+function channelBasePrice(ch){
+  if(!ch) return Number(state.settings.priceOther);
+  if(ch.priceType==='lineoa') return Number(state.settings.priceLineOA);
+  if(ch.priceType==='custom') return Number(ch.customPrice)||0;
+  return Number(state.settings.priceOther);
+}
 function channelPrice(ch){
-  const c = findChannel(ch);
-  const priceType = c ? c.priceType : 'other';
-  return priceType==='lineoa' ? Number(state.settings.priceLineOA) : Number(state.settings.priceOther);
+  return channelBasePrice(findChannel(ch));
 }
 function saleRevenue(row){
   const price = channelPrice(row.channel);
@@ -941,16 +945,16 @@ function renderDashboard(){
   </div>
 
   <div class="section-title">📡 ช่องทางการขาย &amp; ค่าคอมมิชชั่น</div>
-  <div class="section-hint">แต่ละช่องทางเลือกได้ว่าจะอิงราคาไหน — "ราคา LINE OA" (ปกติไม่หักค่าคอม) หรือ "ราคาช่องทางอื่น" (ใช้กับช่องทางที่แพลตฟอร์มหักค่าคอม) แล้วตั้งค่าคอม % ของช่องทางนั้นแยกได้เอง เพิ่มช่องทางใหม่ได้ที่แท็บ "ยอดขาย"</div>
+  <div class="section-hint">แต่ละช่องทางเลือกได้ว่าจะอิงราคาไหน — "ราคา LINE OA", "ราคาช่องทางอื่น" หรือ "กำหนดราคาเอง" (พิมพ์ตัวเลขราคา/ขวดของช่องทางนั้นได้ตรงนี้เลย) แล้วตั้งค่าคอม % แยกได้เอง เพิ่มช่องทางใหม่ได้ที่แท็บ "ยอดขาย"</div>
   <div class="table-wrap"><table>
-    <thead><tr><th>ช่องทาง</th><th>อิงราคา</th><th class="num">ค่าคอม (%)</th><th class="num">ราคาที่ได้จริง/ขวด</th><th></th></tr></thead>
+    <thead><tr><th>ช่องทาง</th><th>อิงราคา</th><th class="num">ราคา/ขวด (บาท)</th><th class="num">ค่าคอม (%)</th><th class="num">ราคาที่ได้จริง/ขวด</th><th></th></tr></thead>
     <tbody>
     ${state.channels.map((ch,idx)=>{
-      const basePrice = ch.priceType==='lineoa' ? Number(s.priceLineOA) : Number(s.priceOther);
+      const basePrice = channelBasePrice(ch);
       const netPrice = basePrice*(1-Number(ch.commission||0));
       if(channelPendingDeleteIdx===idx){
         return `<tr>
-          <td colspan="5">
+          <td colspan="6">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;">
               <span style="font-size:13px;font-weight:700;color:var(--coral);">⚠️ ลบช่องทาง "${ch.name}" ใช่หรือไม่? (ยอดขายเก่าของช่องทางนี้จะยังอยู่ในรายงาน)</span>
               <button type="button" class="btn btn-danger btn-sm" data-channel-del-confirm="${idx}">ยืนยัน ลบ</button>
@@ -964,7 +968,11 @@ function renderDashboard(){
         <td><select data-channel-pricetype="${idx}" style="background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:6px 8px;">
           <option value="lineoa" ${ch.priceType==='lineoa'?'selected':''}>ราคา LINE OA (${fmtMoney(s.priceLineOA)} บ.)</option>
           <option value="other" ${ch.priceType==='other'?'selected':''}>ราคาช่องทางอื่น (${fmtMoney(s.priceOther)} บ.)</option>
+          <option value="custom" ${ch.priceType==='custom'?'selected':''}>กำหนดราคาเอง</option>
         </select></td>
+        <td class="num">${ch.priceType==='custom'
+          ? `<input class="mono" type="number" min="0" step="0.01" data-channel-customprice="${idx}" value="${Number(ch.customPrice||0)}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;">`
+          : `<span style="color:var(--ink-soft);">${fmtMoney(basePrice)}</span>`}</td>
         <td class="num"><input class="mono" type="number" min="0" max="100" step="0.01" data-channel-commission="${idx}" value="${(Number(ch.commission||0)*100).toLocaleString('th-TH',{maximumFractionDigits:2})}" style="width:80px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
         <td class="num">${fmtMoney(netPrice)} บาท</td>
         <td><button type="button" class="btn btn-danger btn-sm" data-channel-del="${idx}">ลบ</button></td>
@@ -1101,10 +1109,12 @@ function renderSalesTab(){
         <select id="f-new-channel-pricetype" style="background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:8px 10px;">
           <option value="lineoa">ใช้ราคา LINE OA (${fmtMoney(state.settings.priceLineOA)} บ./ขวด)</option>
           <option value="other" selected>ใช้ราคาช่องทางอื่น (${fmtMoney(state.settings.priceOther)} บ./ขวด)</option>
+          <option value="custom">กำหนดราคาเอง (ระบุตัวเลข)</option>
         </select>
+        <input type="number" min="0" step="0.01" id="f-new-channel-customprice" placeholder="ราคา/ขวด (บาท)" style="display:none;max-width:140px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:8px;padding:8px 10px;">
         <button type="button" class="btn btn-brand btn-sm" id="btn-channel-add-save">บันทึกช่องทาง</button>
       </div>
-      <div class="section-hint" style="margin:6px 0 0;">เลือกได้ว่าช่องทางใหม่จะอิงราคา LINE OA หรือราคาช่องทางอื่น ส่วนค่าคอมมิชชั่น (%) ของช่องทางนี้ไปตั้งแยกได้ที่แท็บ "ภาพรวม" หัวข้อ "ช่องทางการขาย &amp; ค่าคอมมิชชั่น" (เริ่มต้น 0%)</div>
+      <div class="section-hint" style="margin:6px 0 0;">เลือกได้ว่าช่องทางใหม่จะอิงราคา LINE OA, ราคาช่องทางอื่น หรือกำหนดราคาของตัวเองแยกต่างหาก — เพิ่มแล้วจะไปโชว์ที่แท็บ "ภาพรวม" หัวข้อ "ช่องทางการขาย &amp; ค่าคอมมิชชั่น" ทันที (ค่าคอม % เริ่มต้น 0% ไปตั้งเพิ่มได้ที่นั่น)</div>
     </div>
   </div>
   <div class="table-wrap"><table>
@@ -1599,6 +1609,14 @@ function attachHandlers(){
         renderAll();
       });
     });
+    document.querySelectorAll('[data-channel-customprice]').forEach(inp=>{
+      inp.addEventListener('change', async ()=>{
+        const idx = parseInt(inp.dataset.channelCustomprice);
+        state.channels[idx].customPrice = parseFloat(inp.value)||0;
+        await persist('channels');
+        renderAll();
+      });
+    });
     document.querySelectorAll('[data-channel-del]').forEach(b=>{
       b.addEventListener('click', ()=>{
         if(state.channels.length<=1){ showToast('ต้องมีช่องทางการขายอย่างน้อย 1 ช่องทาง'); return; }
@@ -1655,15 +1673,22 @@ function attachHandlers(){
     if(chToggle) chToggle.addEventListener('click', ()=>{
       chBox.style.display = chBox.style.display==='flex' ? 'none' : 'flex';
     });
+    const chPriceTypeSel = document.getElementById('f-new-channel-pricetype');
+    const chCustomPriceInp = document.getElementById('f-new-channel-customprice');
+    if(chPriceTypeSel) chPriceTypeSel.addEventListener('change', ()=>{
+      chCustomPriceInp.style.display = chPriceTypeSel.value==='custom' ? 'inline-block' : 'none';
+    });
     const chSave = document.getElementById('btn-channel-add-save');
     if(chSave) chSave.addEventListener('click', async ()=>{
       const name = document.getElementById('f-new-channel').value.trim();
       const priceType = document.getElementById('f-new-channel-pricetype').value;
+      const customPrice = parseFloat(document.getElementById('f-new-channel-customprice').value)||0;
       if(!name){ showToast('กรุณากรอกชื่อช่องทาง'); return; }
       if(state.channels.some(c=>c.name.toLowerCase()===name.toLowerCase())){ showToast('มีช่องทางนี้อยู่แล้ว'); return; }
-      state.channels.push({name, priceType, commission:0});
+      if(priceType==='custom' && customPrice<=0){ showToast('กรุณากรอกราคา/ขวดของช่องทางนี้'); return; }
+      state.channels.push({name, priceType, customPrice: priceType==='custom' ? customPrice : 0, commission:0});
       await persist('channels');
-      showToast(`เพิ่มช่องทาง "${name}" เรียบร้อยแล้ว — ไปตั้งค่าคอมมิชชั่นได้ที่แท็บภาพรวม`);
+      showToast(`เพิ่มช่องทาง "${name}" เรียบร้อยแล้ว — ดูได้ที่แท็บภาพรวมทันที`);
       renderAll();
     });
   }
