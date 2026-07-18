@@ -691,6 +691,33 @@ function purchasedOn(d, ingredientName){
   return state.purchaseLog.filter(r=>r.date===d && r.ingredient===ingredientName)
     .reduce((s,r)=>s+Number(r.qty),0);
 }
+function ingredientPurchasedTotal(name){
+  return state.purchaseLog.filter(r=>r.ingredient===name).reduce((s,r)=>s+Number(r.qty||0),0);
+}
+function ingredientConsumedGramsTotal(name){
+  let total = 0;
+  state.productionLog.forEach(row=>{
+    Object.keys(row.menus||{}).forEach(mkey=>{
+      const cell = row.menus[mkey];
+      const produced = Number(cell && cell.produced)||0;
+      if(!produced) return;
+      const recipe = state.recipes.find(r=>r.key===mkey);
+      if(!recipe) return;
+      recipe.ingredients.forEach(ing=>{
+        if(ing.name===name) total += (Number(ing.qty)/10)*produced; // qty = กรัม/10ขวด -> กรัม/ขวด x จำนวนขวดที่ผลิตจริง
+      });
+    });
+  });
+  return total;
+}
+function ingredientStockRemaining(name){
+  const ing = state.ingredients.find(x=>x.name===name);
+  const gramsPerUnit = ing? Number(ing.weight||0)*1000 : 0;
+  const purchasedUnits = ingredientPurchasedTotal(name);
+  const consumedGrams = ingredientConsumedGramsTotal(name);
+  const consumedUnits = gramsPerUnit>0 ? consumedGrams/gramsPerUnit : consumedGrams;
+  return purchasedUnits - consumedUnits;
+}
 function ingredientRequiredForBatch(name){
   let total = 0;
   state.recipes.forEach(r=>{
@@ -1024,6 +1051,21 @@ function renderDashboard(){
   <div class="section-title">📈 แนวโน้มยอดขาย 7 วันล่าสุด (ขวด)</div>
   <div class="chart-card">${sparkBarChart(trend,maxTrend)}</div>
 
+  <div class="section-title">🍇 สต๊อกวัตถุดิบคงเหลือ</div>
+  <div class="section-hint">คำนวณจากยอดซื้อสะสมทั้งหมด (แท็บ "ซื้อวัตถุดิบ") ลบด้วยยอดที่ใช้ผลิตจริงสะสม (แท็บ "การผลิต" x ปริมาณตามสูตรที่ล็อคไว้) — ถ้ามีวัตถุดิบตั้งต้นก่อนเริ่มบันทึกในระบบ ตัวเลขนี้จะยังไม่รวมส่วนนั้น</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>วัตถุดิบ</th><th class="num">คงเหลือ</th><th class="num">น้ำหนักคงเหลือ (กก.)</th><th>สถานะ</th></tr></thead>
+    <tbody>
+    ${state.ingredients.map(ing=>{
+      const remain = ingredientStockRemaining(ing.name);
+      const gramsPerUnit = Number(ing.weight||0)*1000;
+      const remainKg = gramsPerUnit>0 ? (remain*gramsPerUnit)/1000 : remain/1000;
+      const low = remain<=0;
+      return `<tr><td>${ing.name}</td><td class="num">${remain.toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</td><td class="num">${remainKg.toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td><td>${low?`<span class="pill badge-red">🔴 หมด/ติดลบ</span>`:`<span class="pill badge-green">🟢 มีอยู่</span>`}</td></tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>
+
   <div class="section-title">🛒 เช็คสต๊อกก่อนซื้อวันนี้</div>
   <div class="section-hint">เทียบจำนวนที่ซื้อวันนี้ (บันทึกในแท็บ "ซื้อวัตถุดิบ") กับปริมาณที่ต้องใช้ตามสูตร 1 รอบผลิต (5 เมนู x 10 ขวด) — คอลัมน์ "น้ำหนักที่ต้องซื้อเพิ่ม" แปลงจากจำนวนชิ้นเป็นกิโลกรัมให้อัตโนมัติ (จากน้ำหนัก/หน่วยที่ตั้งไว้ในแท็บ "สูตร &amp; วัตถุดิบ") เผื่อร้านขายเป็นกิโลไม่ได้นับเป็นลูก</div>
   <div class="table-wrap"><table>
@@ -1216,7 +1258,8 @@ function renderProductionTab(){
 
   return `
   <div class="section-title">🏭 บันทึกการผลิตรายวัน</div>
-  <div class="section-hint">1 แถว = ผลิตทั้งหมดที่ทำใน 1 วัน — ระบบคำนวณของเสีย/มูลค่าของเสียตามอายุการเก็บรักษาของแต่ละเมนูให้อัตโนมัติ (ดูที่แท็บภาพรวม)</div>
+  <div class="section-hint">1 แถว = ผลิตทั้งหมดที่ทำใน 1 วัน — ระบบคำนวณของเสีย/มูลค่าของเสียตามอายุการเก็บรักษาของแต่ละเมนูให้อัตโนมัติ (ดูที่แท็บภาพรวม) ถ้ายังไม่มีเมนู/สูตรที่ต้องการ กดปุ่มด้านล่างเพื่อเพิ่มได้เลย จะขึ้นในฟอร์มนี้ทันที</div>
+  <div style="margin-bottom:10px;"><button type="button" class="btn btn-ghost btn-sm" id="btn-prod-add-recipe">+ เพิ่มเมนู/สูตรใหม่ (ผลไม้ชนิดอื่น)</button></div>
   <div class="form-card">
     <div class="field" style="max-width:260px;margin-bottom:14px;"><label>วันที่ผลิต</label>${dateFieldHTML('f-prod-date', editRow?editRow.date:todayStr())}</div>
     <div class="form-grid">${menuInputs}</div>
@@ -1253,34 +1296,11 @@ function renderRecipesTab(){
   const batchBottles = state.recipes.length*10;
   const batchLabel = `${state.recipes.length} เมนู x 10 ขวด = ${batchBottles} ขวด`;
   return `
-  <div class="section-title">📋 ราคาวัตถุดิบต่อหน่วย</div>
-  <div class="section-hint">ใส่ "ราคา" และ "หน่วย" ตามที่ซื้อจริงได้เลย (เช่น แอปเปิ้ล 12 บาท/ลูก) ไม่ต้องคิดเป็นราคาต่อกรัมเอง — ใส่ "น้ำหนัก/หน่วย (กก.)" ไว้ 1 ค่าเพื่อให้ระบบแปลงเป็นกรัมสำหรับคำนวณต้นทุนสูตรอัตโนมัติ (ปรับราคา/น้ำหนักได้อิสระ ไม่กระทบปริมาณสูตรที่ล็อคไว้) คอลัมน์ขวา 2 ช่องคือปริมาณที่ต้องใช้จริงต่อ 1 รอบผลิต (${batchLabel}) แปลงเป็นจำนวนที่ต้องซื้อและน้ำหนักให้อัตโนมัติ สำหรับใช้อ้างอิงตอนไปซื้อของจริง</div>
-  <div class="table-wrap"><table>
-    <thead><tr><th>วัตถุดิบ</th><th>หน่วย</th><th class="num">ราคา/หน่วย (บาท)</th><th class="num">น้ำหนัก/หน่วย (กก.)</th><th class="num">ใช้/รอบผลิต (${batchBottles} ขวด)</th><th class="num">น้ำหนักที่ต้องซื้อ (กก.)</th></tr></thead>
-    <tbody>
-    ${state.ingredients.map((ing,idx)=>{
-      const gramsNeeded = ingredientRequiredForBatch(ing.name);
-      const gramsPerUnit = Number(ing.weight||0)*1000;
-      const unitsNeeded = gramsPerUnit>0 ? gramsNeeded/gramsPerUnit : gramsNeeded;
-      const needWeightKg = gramsNeeded/1000;
-      return `
-      <tr><td>${ing.name}</td>
-        <td><input class="mono" data-ing-unit="${idx}" type="text" value="${ing.unit}" style="width:70px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
-        <td class="num"><input class="mono" data-ing-price="${idx}" type="number" min="0" step="0.01" value="${ing.price}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
-        <td class="num"><input class="mono" data-ing-weight="${idx}" type="number" min="0" step="0.001" value="${ing.weight}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
-        <td class="num">${unitsNeeded.toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</td>
-        <td class="num">${needWeightKg.toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>`;
-    }).join('')}
-    <tr class="total-row"><td colspan="5">รวมน้ำหนักวัตถุดิบทั้งหมดที่ต้องซื้อ (1 รอบผลิต / ${batchBottles} ขวด)</td>
-      <td class="num">${(state.ingredients.reduce((s,ing)=>s+ingredientRequiredForBatch(ing.name),0)/1000).toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>
-    </tbody>
-  </table></div>
-
   <div class="section-title" style="justify-content:space-between;flex-wrap:wrap;gap:10px;">
     <span>🍹 สูตรเมนู (แสดงต่อ 10 ขวด และต่อ 1 ขวด/เมนู)</span>
     <button class="btn btn-brand btn-sm" id="btn-recipe-add">+ เพิ่มสูตรใหม่</button>
   </div>
-  <div class="section-hint">สูตรทุกเมนูกำหนดเป็น "กรัมต่อขวด" เสมอ (ตายตัวตามมาตรฐานหน้าร้าน ไม่ขึ้นกับหน่วยซื้อ) — กรอกจำนวนกรัมต่อ 1 ขวดได้เลย ระบบจะคำนวณต่อ 10 ขวดและต้นทุนให้อัตโนมัติ ตัวเลข "≈ ... ลูก/หัว" ที่โชว์ใต้ช่องกรอกเป็นแค่ตัวช่วยประมาณตอนไปซื้อของ (จะเปลี่ยนถ้าปรับ "น้ำหนัก/หน่วย" ด้านบน แต่ไม่กระทบปริมาณสูตรจริง) — ปรับอายุการเก็บรักษาของแต่ละเมนูได้เช่นกัน หรือกด "แก้ไขสูตร" เพื่อเปลี่ยนรูปภาพ ชื่อ และจุดเด่นของสูตร</div>
+  <div class="section-hint">สูตรทุกเมนูกำหนดเป็น "กรัมต่อขวด" เสมอ (ตายตัวตามมาตรฐานหน้าร้าน ไม่ขึ้นกับหน่วยซื้อ) — กรอกจำนวนกรัมต่อ 1 ขวดได้เลย ระบบจะคำนวณต่อ 10 ขวดและต้นทุนให้อัตโนมัติ ตัวเลข "≈ ... ลูก/หัว" ที่โชว์ใต้ช่องกรอกเป็นแค่ตัวช่วยประมาณตอนไปซื้อของ (จะเปลี่ยนถ้าปรับ "น้ำหนัก/หน่วย" ด้านล่าง แต่ไม่กระทบปริมาณสูตรจริง) — ปรับอายุการเก็บรักษาของแต่ละเมนูได้เช่นกัน หรือกด "แก้ไขสูตร" เพื่อเปลี่ยนรูปภาพ ชื่อ และจุดเด่นของสูตร</div>
   ${state.recipes.map((r,ridx)=>{
     const cost = recipeBatchCost(r.key);
     const theme = recipeTheme(ridx);
@@ -1345,6 +1365,29 @@ function renderRecipesTab(){
       </div>
     </div>`;
   }).join('')}
+
+  <div class="section-title">📋 ราคาวัตถุดิบต่อหน่วย</div>
+  <div class="section-hint">ใส่ "ราคา" และ "หน่วย" ตามที่ซื้อจริงได้เลย (เช่น แอปเปิ้ล 12 บาท/ลูก) ไม่ต้องคิดเป็นราคาต่อกรัมเอง — ใส่ "น้ำหนัก/หน่วย (กก.)" ไว้ 1 ค่าเพื่อให้ระบบแปลงเป็นกรัมสำหรับคำนวณต้นทุนสูตรอัตโนมัติ (ปรับราคา/น้ำหนักได้อิสระ ไม่กระทบปริมาณสูตรที่ล็อคไว้) คอลัมน์ขวา 2 ช่องคือปริมาณที่ต้องใช้จริงต่อ 1 รอบผลิต (${batchLabel}) แปลงเป็นจำนวนที่ต้องซื้อและน้ำหนักให้อัตโนมัติ สำหรับใช้อ้างอิงตอนไปซื้อของจริง</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>วัตถุดิบ</th><th>หน่วย</th><th class="num">ราคา/หน่วย (บาท)</th><th class="num">น้ำหนัก/หน่วย (กก.)</th><th class="num">ใช้/รอบผลิต (${batchBottles} ขวด)</th><th class="num">น้ำหนักที่ต้องซื้อ (กก.)</th></tr></thead>
+    <tbody>
+    ${state.ingredients.map((ing,idx)=>{
+      const gramsNeeded = ingredientRequiredForBatch(ing.name);
+      const gramsPerUnit = Number(ing.weight||0)*1000;
+      const unitsNeeded = gramsPerUnit>0 ? gramsNeeded/gramsPerUnit : gramsNeeded;
+      const needWeightKg = gramsNeeded/1000;
+      return `
+      <tr><td>${ing.name}</td>
+        <td><input class="mono" data-ing-unit="${idx}" type="text" value="${ing.unit}" style="width:70px;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
+        <td class="num"><input class="mono" data-ing-price="${idx}" type="number" min="0" step="0.01" value="${ing.price}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
+        <td class="num"><input class="mono" data-ing-weight="${idx}" type="number" min="0" step="0.001" value="${ing.weight}" style="width:90px;text-align:right;background:var(--edit-bg);color:var(--edit-text);border:1px solid #F0DE8A;border-radius:7px;padding:5px 7px;"></td>
+        <td class="num">${unitsNeeded.toLocaleString('th-TH',{maximumFractionDigits:1})} ${ing.unit}</td>
+        <td class="num">${needWeightKg.toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>`;
+    }).join('')}
+    <tr class="total-row"><td colspan="5">รวมน้ำหนักวัตถุดิบทั้งหมดที่ต้องซื้อ (1 รอบผลิต / ${batchBottles} ขวด)</td>
+      <td class="num">${(state.ingredients.reduce((s,ing)=>s+ingredientRequiredForBatch(ing.name),0)/1000).toLocaleString('th-TH',{maximumFractionDigits:2})} กก.</td></tr>
+    </tbody>
+  </table></div>
 
   <div class="section-title">🧮 สรุปต้นทุนวัตถุดิบรวมทุกเมนู</div>
   <div class="grid grid-2">
@@ -1768,6 +1811,8 @@ function attachHandlers(){
   }
 
   if(activeTab==='production'){
+    const addRecipeBtn = document.getElementById('btn-prod-add-recipe');
+    if(addRecipeBtn) addRecipeBtn.addEventListener('click', ()=> openRecipeModal(null));
     const saveBtn = document.getElementById('btn-prod-save');
     if(saveBtn) saveBtn.addEventListener('click', async ()=>{
       const date = readDateField('f-prod-date');
